@@ -3,6 +3,7 @@
 (defpackage :jpegmeta
   (:use :com.gigamonkeys.binary-data :common-lisp :asdf :pushbackstreams
 	:com.gigamonkeys.binary-data.common-datatypes)
+  (:shadowing-import-from :alexandria if-let when-let appendf)
   (:export :read-jpeg-from-stream
 	   :read-jpeg-from-file
 	   :write-jpeg-to-stream
