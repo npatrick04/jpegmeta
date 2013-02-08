@@ -9,5 +9,15 @@
 	   :write-jpeg-to-file
 	   :get-iptc-fields
 	   :get-iptc-field
-	   :set-iptc-fields))
+	   :set-iptc-fields
+	   :get-tiff-fields
+	   :get-tiff-field
+	   :get-exif-fields
+	   :get-exif-field
+	   :get-gps-fields
+	   :get-ifds
+
+           ;; Restarts
+           :nil-after-invalid-segment
+           :return-zero))
 

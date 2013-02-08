@@ -108,6 +108,418 @@
 ;; APP0-segment
 (define-binary-class app0-segment (generic-segment) ())
 
+;; APP1-segment
+(define-tagged-binary-class app1-segment (jpeg-segment)
+  ((size u2)
+   (exif (iso-8859-1-string :length 4))
+   (exif-zeros u2))
+  (:dispatch (cond ((string= (string-upcase exif) "EXIF") 'exif-app1-segment)
+                   (t 'unknown-app1-segment))))
+
+(define-binary-class unknown-app1-segment (app1-segment)
+  ((data (raw-bytes :size (- size 2 4 2)))))
+
+(defmethod print-object ((obj unknown-app1-segment) stream)
+  (print-unreadable-object (obj stream :type t)
+    (with-slots (exif) obj
+      (format stream "App1 segment tag=~A" exif))))
+
+(define-binary-class exif-app1-segment (app1-segment)
+  ((endian tiff-endian)
+   (fourty-two (u2-o :order endian))
+   (ifd (ifd-pointer :type 'tiff-ifd
+                     :order endian
+                     :add-to-read nil))
+   (pointer-space (ifd-pointer-space :order endian
+                                     :offset 8
+                                     :initial-pointer ifd
+                                     :end (- size 2 4 2)))))
+
+(defmethod print-object ((obj exif-app1-segment) stream)
+  (print-unreadable-object (obj stream :type t)
+    (with-slots (endian fourty-two) obj
+      (format stream "endianness:~A, fourty-two:~A"
+	      endian fourty-two))))
+
+(define-binary-class ifd-pointer-type ()
+  ((offset (u4-o :order (endian (parent-of-type 'exif-app1-segment))))
+   (value-type (optional))
+   (value (optional))
+   (entry-count (optional))))
+
+(defmethod print-object ((obj ifd-pointer-type) stream)
+  (print-unreadable-object (obj stream :type t)
+    (with-slots (offset value-type value) obj
+      (format stream "type:~A at offset:~A ~A" value-type offset
+	      (if value
+		  (format nil "evaluated to ~A" value)
+		  "unevaluated")))))
+	     
+(define-binary-type ifd-pointer (order type (add-to-read t))
+  (:reader (in)
+	   (let ((pointer (read-value 'ifd-pointer-type in)))
+	     (declare (special to-be-read))
+	     (setf (value-type pointer) type)
+	     (if (zerop (offset pointer))
+		 (progn (setf (value pointer) nil)
+			pointer)
+		 (progn (when add-to-read (push pointer to-be-read))
+			pointer))))
+  (:writer (out data)
+           (declare (ignorable out data))
+           (error "No writer defined for ifd-pointer")
+	   ;; Do something
+	   nil))
+
+(define-condition invalid-ifd-type (error)
+  ((ifd-type :initarg :type :reader ifd-type)))
+
+(defun return-zero (c)
+  (declare (ignore c))
+  (let ((restart (find-restart 'return-zero)))
+    (when restart (invoke-restart restart))))
+
+(defun get-type-size (type)
+  (cond
+    ((member type '(u1 s1-o iso-8859-1-string undefined-byte null-terminated-string)) 1)
+    ((member type '(u2 s2-o u2-o)) 2)
+    ((member type '(u4 s4-o u4-o single-float)) 4)
+    ((member type '(double-float rational srational)) 8)
+    (t (restart-case (error 'invalid-ifd-type :ifd-type type)
+	 (return-zero () 0)))))
+
+(define-binary-type maybe-pointer (order type entry-count)
+  (:reader (in)
+	   (handler-bind ((invalid-ifd-type #'return-zero))
+	     (let ((type-size (get-type-size (if (listp type)
+						 (car type)
+						 type))))
+	       ;; (format
+	       ;; 	       (id (current-binary-object)) type entry-count type-size)
+	       (cond
+		 ((zerop type-size) (list 'dunno
+					  (id (current-binary-object))
+					  type
+					  entry-count
+					  type-size))
+		 ((> (* entry-count type-size) 4)
+		  (read-value 'ifd-pointer in :order order :type type :add-to-read t))
+		 ((member (id (current-binary-object)) special-ifd-tags)
+		  (read-value 'ifd-pointer in :type 'tiff-ifd :order order))
+		 (t (progn
+		      (let ((final-value '()))
+			(dotimes (i entry-count)
+			  (appendf final-value (list (eval (type->read-value type in)))))
+			(let ((ignored-data (read-value 'raw-bytes in :size (- 4 (* entry-count type-size)))))
+                          (declare (ignore ignored-data))
+			  ;; (format t "Final value=~A~%" final-value)
+			  ;; (format t "Size of final value: ~A~%Size of ignored data: ~A~%"
+			  ;; 	  (length final-value) (length ignored-data))
+			  final-value))))))))
+  (:writer (out data)
+           (declare (ignorable out data))
+           (error "No writer defined for maybe-pointer")
+	   ;; TODO something
+	   ))
+
+(define-binary-type ifd-pointer-space (order offset initial-pointer end)
+  (:reader (in)
+	   ;; (format t "App1 segment size:~A~%end offset:~A~%"
+	   ;; 	   (size (parent-of-type 'app1-segment))
+	   ;; 	   end)
+	   (let ((to-be-read (list initial-pointer (make-instance
+						    'ifd-pointer-type
+						      :offset end
+						      :value-type :the-end-of-ifd-space
+						      :value 'unevaluated)))
+		 (start (- (pb-stream-position in) offset))
+		 (unread-chunks '())
+                 (next-ptr nil))
+	     (declare (special to-be-read))
+	     (loop while to-be-read
+		do (progn
+                     (setf next-ptr (pop to-be-read))
+		     (let ((current-offset (- (pb-stream-position in) start)))
+		       ;; (format t "Next to-be-read while at offset ~A: ~A~%" current-offset next-ptr)
+		       (when (>= (offset next-ptr) current-offset)
+			 (if-let (chunk (read-next-pointer-value next-ptr in current-offset))
+			   (push chunk unread-chunks))
+			 (setf to-be-read (sort to-be-read #'< :key #'offset)))))
+                until (eq (value-type next-ptr)
+                            :the-end-of-ifd-space))
+	     ;; (format t "Finished with pointer space, at offset ~A~%"
+	     ;; 	     (- (pb-stream-position in) start))
+	     (nreverse unread-chunks)))
+  (:writer (out data)
+           (error "Fix writer for ifd-pointer-space")
+	   (write-value 'ifd-pointer out data :order order)))
+
+(defun has-length (type)
+  (member type '(iso-8859-1-string)))
+
+(defclass chunk-type ()
+  ((tiff-offset :accessor tiff-offset
+		:initarg :tiff-offset
+		:initform (error "Chunk-type requires a tiff offset"))
+   (contents :accessor chunk-contents
+	     :initarg :chunk-contents
+	     :initform (error "Chunk-type requires contents"))))
+
+(defmethod print-object ((obj chunk-type) stream)
+  (print-unreadable-object (obj stream :type t)
+    (with-slots (tiff-offset contents) obj
+      (format stream "offset:~A, size:~A" tiff-offset (length contents)))))
+
+(defun read-next-pointer-value (pt in offset)
+  "returns unread chunks"
+  (let ((unread-chunk nil)
+        (new-pointer-value nil))
+    ;; (format t "Reading next pointer value, type:~A~%" (value-type pt))
+    ;; (format t "  Current offset: ~A, pointer offset: ~A~%" offset (offset pt))
+    (unless (equal (offset pt) offset)
+      (setf unread-chunk
+	    (make-instance 'chunk-type
+			   :tiff-offset offset
+			   :chunk-contents (read-value 'raw-bytes in :size (- (offset pt) offset)))))
+    (incf offset (- (offset pt) offset))
+    ;; (format t "Now reading pointer value at ~A: ~%" offset)
+    ;; (setf new-pointer-value (type->read-value (value-type pt) in))
+    ;; (format t "~A~%") 
+    ;; (format t "entry-count=~A~%" (entry-count pt))
+    (setf (value pt)
+	  (cond
+	    ((eq (value-type pt) :the-end-of-ifd-space) nil)
+	    ((null (entry-count pt)) (eval (type->read-value (value-type pt) in)))
+	    (t (let ((num-bytes (* (entry-count pt)
+				   (get-type-size (if (listp (value-type pt))
+						      (car (value-type pt))
+						      (value-type pt)))))
+		     (start-pos (pb-stream-position in)))
+		 ;; (format t "num-bytes=~A~%" num-bytes)
+		 (loop while (< (pb-stream-position in)
+				(+ start-pos num-bytes))
+		    collect (eval (type->read-value (value-type pt) in)))))))
+    ;; (format t "PT=~A~%" pt)
+    unread-chunk))
+
+(define-binary-class tiff-ifd ()
+  ((num-entries (u2-o :order (endian (parent-of-type 'exif-app1-segment))))
+   (entries (ifd-entries :count num-entries))
+   (next-ifd (ifd-pointer :type 'tiff-ifd
+			  :order (endian (parent-of-type 'exif-app1-segment))))))
+
+(define-binary-type ifd-entries (count)
+  (:reader (in)
+	   ;; (format t "Reading ifd-entries, count=~A~%" (num-entries (current-binary-object)))
+	   (let ((result '()))
+	     (dotimes (i (num-entries (current-binary-object)) (nreverse result))
+	       (handler-bind ((com.gigamonkeys.binary-data::no-symbol-for-value-enum #'com.gigamonkeys.binary-data::return-unknown-value))
+		 (let ((latest-entry (read-value 'ifd-entry in)))
+		   (push latest-entry result))))))
+  (:writer (out data)
+	   (dolist (entry data)
+	     (write-value 'ifd-entry out entry))))
+
+(define-binary-class ifd-entry ()
+  ((id (ifd-tag :type '(u2-o :order (endian (parent-of-type 'exif-app1-segment)))))
+   (entry-type (ifd-type :type '(u2-o :order (endian (parent-of-type 'exif-app1-segment)))))
+   (entry-count (u4-o :order (endian (parent-of-type 'exif-app1-segment))))
+   (pointer (maybe-pointer :order (endian (parent-of-type 'exif-app1-segment))
+			   :type entry-type
+			   :entry-count entry-count))))
+
+(defmethod print-object ((obj ifd-entry) stream)
+  (print-unreadable-object (obj stream :type t)
+    (with-slots (id entry-type entry-count pointer) obj
+      (format stream "id:~A, entry-type:~A, entry-count:~A, value:~A"
+	      id (if (listp entry-type)
+		     (car entry-type)
+		     entry-type)
+	      entry-count
+	      pointer))))
+
+;;;
+;;;  Exif/Tiff basic types
+;;; 
+
+(define-enumeration ifd-tag
+    (gps-version-id                     0)
+  (gps-latitude-ref                     1)
+  (gps-latitude				2)
+  (gps-longitude-ref			3)
+  (gps-longitude			4)
+  (gps-altitude-ref			5)
+  (gps-altitude				6)
+  (gps-timestamp			7)
+  (gps-satellites			8)
+  (gps-status				9)
+  (gps-measure-mode			10)
+  (gps-degree-of-precision		11)
+  (gps-speed-ref			12)
+  (gps-speed				13)
+  (gps-track-ref			14)
+  (gps-track				15)
+  (gps-img-direction-ref		16)
+  (gps-img-direction			17)
+  (gps-map-datum			18)
+  (gps-dest-latitude-ref		19)
+  (gps-dest-latitude			20)
+  (gps-dest-longitude-ref		21)
+  (gps-dest-longitude			22)
+  (gps-dest-bearing-ref			23)
+  (gps-dest-bearing			24)
+  (gps-dest-distance-ref		25)
+  (gps-dest-distance			26)
+  (gps-processing-method		27)
+  (gps-area-information			28)
+  (gps-datestamp			29)
+  (gps-differential			30)
+  (photometric-interpretation		262)
+  (compression				259)
+  (image-length				257)
+  (image-width				256)
+  ;; (resolution-unit			259)
+  (min-sample-value			280)
+  (max-sample-value			281)
+  (x-resolution				282)
+  (y-resolution				283)
+  (date-time				306)
+  (rows-per-strip			278)
+  (make					271)
+  (model				272)
+  (strip-offsets			273)
+  (orientation				274)
+  (strip-byte-counts			279)
+  (resolution-unit			296)
+  (JPEG-Interchange-Format		513)
+  (JPEG-Interchange-Format-Length	514)
+  (YCbCr-Positioning			531)
+  (private-exif-ifd			34665)
+  (gps-info				34853)
+  (exposure-time			33434)
+  (f-number				33437)
+  (exposure-program			34850)
+  (spectral-sensitivity			34852)
+  (iso-speed-ratings			34855)
+  (oecf					34856)
+  (exif-version				36864)
+  (date-time-original			36867)
+  (date-time-digitized			36868)
+  (components-configuration		37121)
+  (compressed-bits-per-pixel		37122)
+  (shutter-speed-value			37377)
+  (aperture-value			37378)
+  (brightness-value			37379)
+  (exposure-bias-value			37380)
+  (max-aperture-value			37381)
+  (subject-distance			37382)
+  (metering-mode			37383)
+  (light-source				37384)
+  (flash				37385)
+  (focal-length				37386)
+  (subject-area				37396)
+  (maker-note				37500)
+  (user-comment				37510)
+  (subsec-time				37520)
+  (subsec-time-original			37521)
+  (subsec-time-digitized		37522)
+  (flashpix-version			40960)
+  (color-space				40961)
+  (pixel-x-dimension			40962)
+  (pixel-y-dimension			40963)
+  (related-sound-file			40964)
+  (interoperability-ifd                 40965)
+  (flash-energy				41483)
+  (spatial-frequency-response		41484)
+  (focal-plane-x-resolution		41486)
+  (focal-plane-y-resolution		41487)
+  (focal-plane-resolution-unit		41488)
+  (subject-location			41492)
+  (exposure-index			41493)
+  (sensing-method			41495)
+  (file-source				41728)
+  (scene-type				41729)
+  (cfa-pattern				41730)
+  (custom-rendered			41985)
+  (exposure-mode			41986)
+  (white-balance			41987)
+  (digital-zoom-ratio			41988)
+  (focal-length-in-35mm-film            41989)
+  (scene-capture-type			41990)
+  (gain-control				41991)
+  (contrast				41992)
+  (saturation				41993)
+  (sharpness				41994)
+  (device-setting-description		41995)
+  (subject-distance-range		41996)
+  (image-unique-id			42016))
+
+(defparameter special-ifd-tags '(private-exif-ifd
+				 gps-info
+				 interoperability-ifd))
+
+(define-binary-type null-terminated-string ()
+  (iso-8859-1-terminated-string :terminator +null+))
+
+(define-enumeration ifd-type 
+  (u1								1)
+  (null-terminated-string					2)
+  ((u2-o :order (endian (parent-of-type 'exif-app1-segment)))		3)
+  ((u4-o :order (endian (parent-of-type 'exif-app1-segment)))		4)
+  (rational							5)
+  ((s1-o :order (endian (parent-of-type 'exif-app1-segment)))		6)
+  (undefined-byte						7)
+  ((s2-o :order (endian (parent-of-type 'exif-app1-segment)))		8)
+  ((s4-o :order (endian (parent-of-type 'exif-app1-segment)))		9)
+  (srational							10)
+  ((single-float :order (endian (parent-of-type 'exif-app1-segment)))	11)
+  ((double-float :order (endian (parent-of-type 'exif-app1-segment)))   12))
+
+;; TODO fix
+(define-binary-type single-float (order)
+  (unsigned-integer :bytes 4 :bits-per-byte 8 :order order))
+(define-binary-type double-float (order)
+  (unsigned-integer :bytes 8 :bits-per-byte 8 :order order))
+
+(define-binary-type undefined-byte () (unsigned-integer :bytes 1 :bits-per-byte 8))
+
+(define-binary-type rational ()
+  (:reader (in)
+	   (handler-case
+	       (let ((order (endian (parent-of-type 'exif-app1-segment))))
+		 (/ (read-value 'u4-o in :order order)
+		    (read-value 'u4-o in :order order)))
+	     (division-by-zero () 0)))
+  (:writer (out data)
+	   (let ((order (endian (parent-of-type 'exif-app1-segment))))
+	     (write-value 'u4-o out (numerator data) :order order)
+	     (write-value 'u4-o out (denominator data) :order order))))
+
+(define-binary-type srational ()
+  (:reader (in)
+	   (handler-case
+	       (let ((order (endian (parent-of-type 'exif-app1-segment))))
+		 (/ (read-value 's4-o in :order order)
+		    (read-value 's4-o in :order order)))
+	     (division-by-zero () 0)))
+  (:writer (out data)
+	   (let ((order (endian (parent-of-type 'exif-app1-segment))))
+	     (write-value 's4-o out (numerator data) :order order)
+	     (write-value 's4-o out (denominator data) :order order))))
+
+(define-binary-type tiff-endian ()
+  (:reader (in)
+	   (let ((chars (read-value 'iso-8859-1-string in :length 2)))
+	     ;; (format t "Endianness: ~A~%" chars)
+	     (cond
+	       ((equal chars "II") :little-endian)
+	       ((equal chars "MM") :big-endian)
+	       (t (error "Danger: invalid endianness in TIFF header~%Exif=~A" (exif (parent-of-type 'app1-segment)))))))
+  (:writer (out data)
+	   (if (equal data :big-endian)
+	       (pb-write-chunks "MM" out)
+	       (pb-write-chunks "II" out))))
+
 ;; APP2-segment
 (define-binary-class app2-segment (generic-segment) ())
 
@@ -199,6 +611,7 @@
 	       (loop for i from 0 to padded-size do
 		    (write-char (read-char in) str)))))
   (:writer (out data)
+           (declare (ignorable out data))
 	   nil))
 
 (define-binary-type iptc-fields ()
@@ -471,4 +884,44 @@
   "Set the IPTC fields of a JPEG, returning a new image data structure."
   (ensure-image-has-iptc-fields-resource jpeg-image
 					 (mapcan #'make-iptc iptc-fields)))
-					 
+
+;; Exif info
+(defun get-ifds (jpeg-image)
+  (when-let (app1 (find-if #'(lambda (seg) (typep seg 'exif-app1-segment))
+			   (segments jpeg-image)))
+    (let ((ifds '()))
+      (do ((next-ifd (value (ifd app1)) (value (next-ifd (car ifds)))))
+	  ((null next-ifd) (nreverse ifds))
+	(push next-ifd ifds)))))
+
+(defun maybe-pointer-value (mp)
+  (if (typep (pointer mp) 'ifd-pointer-type)
+      (value (pointer mp))
+      (pointer mp)))
+
+(defun get-ifd-fields (ifd)
+  (labels ((get-ifd-fields (entries fields)
+	     (if (null entries)
+		 (nreverse fields)
+		 (get-ifd-fields (cdr entries)
+				 (cons (cons (id (car entries))
+					     (maybe-pointer-value (car entries)))
+				       fields)))))
+    (get-ifd-fields (entries ifd) '())))
+
+(defun get-tiff-fields (jpeg-image)
+  (mapcan #'get-ifd-fields (get-ifds jpeg-image)))
+
+(defun get-tiff-field (jpeg-image field)
+  (cdr (assoc field (get-tiff-fields jpeg-image))))
+
+(defun get-exif-fields (jpeg-image)
+  (get-ifd-fields (get-tiff-field jpeg-image 'private-exif-ifd)))
+
+(defun get-exif-field (jpeg-image field)
+  (cdr (assoc field (get-exif-fields jpeg-image))))
+
+(defun get-gps-fields (jpeg-image)
+  (get-ifd-fields (get-tiff-field jpeg-image 'gps-info)))
+  
+
