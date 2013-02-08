@@ -12,5 +12,6 @@
   :long-description ""
   :depends-on ("com.gigamonkeys.binary-data" "pushbackstreams")
   :components
-  ((:file "jpegmeta" :depends-on ("binary-data" "pushbackstreams"))))
+  ((:file "package")
+   (:file "jpegmeta" :depends-on ("package"))))
         

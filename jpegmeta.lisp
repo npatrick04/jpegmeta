@@ -1,15 +1,3 @@
-(in-package :cl-user)
-
-(defpackage :jpegmeta
-  (:use :com.gigamonkeys.binary-data :common-lisp :asdf :pushbackstreams)
-  (:export :read-jpeg-from-stream
-	   :read-jpeg-from-file
-	   :write-jpeg-to-stream
-	   :weite-jpeg-to-file
-	   :get-iptc-fields
-	   :get-iptc-field
-	   :set-iptc-fields))
-
 (in-package :jpegmeta)
 
 ;; General binary classes and types
