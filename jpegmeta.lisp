@@ -1,40 +1,12 @@
 (in-package :jpegmeta)
 
-;; General binary classes and types
+(proclaim '(optimize (safety 3) (debug 3)))
 
-(define-binary-type generic-string (length character-type)
-  (:reader (in)
-	   (let ((string (make-string length)))
-	     (dotimes (i length)
-	       (setf (char string i) (read-value character-type in)))
-	     string))
-  (:writer (out string) 
-	   (dotimes (i length)
-	     (write-value character-type out (char string i)))))
+(defmethod generic-read-byte ((stream pushbackstream))
+  (pb-read-byte stream))
 
-(define-binary-type iso-8859-1-char ()
-  (:reader (in)
-	   (let ((code (pb-read-byte in)))
-	     (code-char code)))
-  (:writer (out char)
-	   (let ((code (char-code char)))
-	     (if (<= 0 code #xff)
-		 (write-byte code out)))))
-
-(define-binary-type unsigned-integer (bytes)
-  (:reader (in)
-	   (loop with value = 0
-	      for low-bit downfrom (* 8 (1- bytes)) to 0 by 8 do
-	      (setf (ldb (byte 8 low-bit) value) (pb-read-byte in))
-	      finally (return value)))
-  (:writer (out value)
-	   (loop for low-bit downfrom (* 8 (1- bytes)) to 0 by 8 do
-		(write-byte (ldb (byte 8 low-bit) value) out))))
-
-(define-binary-type u1 () (unsigned-integer :bytes 1))
-(define-binary-type u2 () (unsigned-integer :bytes 2))
-(define-binary-type u3 () (unsigned-integer :bytes 3))
-(define-binary-type u4 () (unsigned-integer :bytes 4))
+(defmethod generic-write-byte (value (stream pushbackstream))
+  (pb-read-byte stream))
 
 (define-binary-type raw-bytes (size)
   (:reader (in)
@@ -48,13 +20,20 @@
 (define-binary-class jpeg-image ()
   ((segments jpeg-segments)))
 
+(defun nil-after-invalid-segment (c)
+  (declare (ignore c))
+  (let ((restart (find-restart 'nil-after-invalid-segment)))
+    (when restart (invoke-restart restart))))
+
 (define-binary-type jpeg-segments ()
   (:reader (in)
-	   (loop for segment = (handler-case (read-value 'jpeg-segment in)
-				 (end-of-file () nil))
+	   (loop for segment =
+                (restart-case (handler-case (read-value 'jpeg-segment in)
+                                (end-of-file () nil))
+                  (nil-after-invalid-segment () nil))
 	      while segment
 	      collect segment))
-	      ; do (format t "~a~%" segment)))
+	      ;;do (format t "~a~%" segment)
   (:writer (out segments)
 	   (loop for seg in segments do
 		(write-value 'jpeg-segment out seg))))
@@ -68,27 +47,33 @@
   (print-unreadable-object (obj stream :type t)
     (format stream "Jpeg-segment")))
 
+(define-condition segment-marker-off (error)
+  ((text :initarg :text :reader text)))
+
 (define-binary-type jpeg-segment-marker ()
   (:reader (in)
 	   (let ((b (pb-read-byte in)))
-	     (if (/= b #xff) (error "Danger! Segment marker is not 0xff!"))
+	     (if (/= b #xff) (error 'segment-marker-off :text "Danger! Segment marker is not 0xff!"))
 	     b))
   (:writer (out marker)
 	   (write-byte marker out)))
 
 (defun find-segment-class (segment-type)
-  (cond
-    ((eq segment-type #xc0) 'sof0-segment)
-    ((eq segment-type #xc4) 'dht-segment)
-    ((eq segment-type #xda) 'sos-segment)
-    ((eq segment-type #xdb) 'dqt-segment)
-    ((eq segment-type #xd8) 'soi-segment)
-    ((eq segment-type #xd9) 'eoi-segment)
-    ((eq segment-type #xe0) 'app0-segment)
-    ((eq segment-type #xe2) 'app2-segment)
-    ((eq segment-type #xed) 'app13-segment)
-    ((eq segment-type #xfe) 'com-segment)
-    (t 'generic-segment)))
+  (let ((seg (cond
+	       ((eq segment-type #xc0) 'sof0-segment)
+	       ((eq segment-type #xc4) 'dht-segment)
+	       ((eq segment-type #xda) 'sos-segment)
+	       ((eq segment-type #xdb) 'dqt-segment)
+	       ((eq segment-type #xd8) 'soi-segment)
+	       ((eq segment-type #xd9) 'eoi-segment)
+	       ((eq segment-type #xe0) 'app0-segment)
+	       ((eq segment-type #xe1) 'app1-segment)
+	       ((eq segment-type #xe2) 'app2-segment)
+	       ((eq segment-type #xed) 'app13-segment)
+	       ((eq segment-type #xfe) 'com-segment)
+	       (t 'generic-segment))))
+    ;;(format t "Segment: ~A~%" seg)
+    seg))
 
 (define-binary-class generic-segment (jpeg-segment)
   ((size u2)
