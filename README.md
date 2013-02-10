@@ -10,5 +10,6 @@ The project is by no means complete, but EXIF support has been added and is some
 Dependencies
 ============
 
-[Binary Data][https://github.com/npatrick04/monkeylib-binary-data]
-[Pushback Streams][https://github.com/npatrick04/pushbackstreams]
+Binary Data: https://github.com/npatrick04/monkeylib-binary-data
+
+Pushback Streams: https://github.com/npatrick04/pushbackstreams
