@@ -10,7 +10,8 @@
   :licence "BSD"
   :description "JPEG metadata manipulation."
   :long-description ""
-  :depends-on ("com.gigamonkeys.binary-data" "pushbackstreams" "alexandria")
+  :depends-on ("com.gigamonkeys.binary-data" "pushbackstreams" "alexandria"
+               "ieee-floats")
   :components
   ((:file "package")
    (:file "jpegmeta" :depends-on ("package"))))

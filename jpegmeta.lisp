@@ -125,15 +125,17 @@
       (format stream "App1 segment tag=~A" exif))))
 
 (define-binary-class exif-app1-segment (app1-segment)
-  ((endian tiff-endian)
-   (fourty-two (u2-o :order endian))
+  ((endian tiff-endian
+           :post-read (setf monkey-types:*endianness* endian)
+           :post-write (setf monkey-types:*endianness* endian))
+   (fourty-two u2)
    (ifd (ifd-pointer :type 'tiff-ifd
-                     :order endian
                      :add-to-read nil))
-   (pointer-space (ifd-pointer-space :order endian
-                                     :offset 8
+   (pointer-space (ifd-pointer-space :offset 8
                                      :initial-pointer ifd
-                                     :end (- size 2 4 2)))))
+                                     :end (- size 2 4 2))
+                  :post-read (setf monkey-types:*endianness* :big-endian)
+                  :post-write (setf monkey-types:*endianness* :big-endian))))
 
 (defmethod print-object ((obj exif-app1-segment) stream)
   (print-unreadable-object (obj stream :type t)
@@ -142,7 +144,7 @@
 	      endian fourty-two))))
 
 (define-binary-class ifd-pointer-type ()
-  ((offset (u4-o :order (endian (parent-of-type 'exif-app1-segment))))
+  ((offset u4)
    (value-type (optional))
    (value (optional))
    (entry-count (optional))))
@@ -155,7 +157,7 @@
 		  (format nil "evaluated to ~A" value)
 		  "unevaluated")))))
 	     
-(define-binary-type ifd-pointer (order type (add-to-read t))
+(define-binary-type ifd-pointer (type (add-to-read t))
   (:reader (in)
 	   (let ((pointer (read-value 'ifd-pointer-type in)))
 	     (declare (special to-be-read))
@@ -188,7 +190,7 @@
     (t (restart-case (error 'invalid-ifd-type :ifd-type type)
 	 (return-zero () 0)))))
 
-(define-binary-type maybe-pointer (order type entry-count)
+(define-binary-type maybe-pointer (type entry-count)
   (:reader (in)
 	   (handler-bind ((invalid-ifd-type #'return-zero))
 	     (let ((type-size (get-type-size (if (listp type)
@@ -203,9 +205,9 @@
 					  entry-count
 					  type-size))
 		 ((> (* entry-count type-size) 4)
-		  (read-value 'ifd-pointer in :order order :type type :add-to-read t))
+		  (read-value 'ifd-pointer in :type type :add-to-read t))
 		 ((member (id (current-binary-object)) special-ifd-tags)
-		  (read-value 'ifd-pointer in :type 'tiff-ifd :order order))
+		  (read-value 'ifd-pointer in :type 'tiff-ifd))
 		 (t (progn
 		      (let ((final-value '()))
 			(dotimes (i entry-count)
@@ -222,7 +224,7 @@
 	   ;; TODO something
 	   ))
 
-(define-binary-type ifd-pointer-space (order offset initial-pointer end)
+(define-binary-type ifd-pointer-space (offset initial-pointer end)
   (:reader (in)
 	   ;; (format t "App1 segment size:~A~%end offset:~A~%"
 	   ;; 	   (size (parent-of-type 'app1-segment))
@@ -252,7 +254,7 @@
 	     (nreverse unread-chunks)))
   (:writer (out data)
            (error "Fix writer for ifd-pointer-space")
-	   (write-value 'ifd-pointer out data :order order)))
+	   (write-value 'ifd-pointer out data)))
 
 (defun has-length (type)
   (member type '(iso-8859-1-string)))
@@ -303,10 +305,9 @@
     unread-chunk))
 
 (define-binary-class tiff-ifd ()
-  ((num-entries (u2-o :order (endian (parent-of-type 'exif-app1-segment))))
+  ((num-entries u2)
    (entries (ifd-entries :count num-entries))
-   (next-ifd (ifd-pointer :type 'tiff-ifd
-			  :order (endian (parent-of-type 'exif-app1-segment))))))
+   (next-ifd (ifd-pointer :type 'tiff-ifd))))
 
 (define-binary-type ifd-entries (count)
   (:reader (in)
@@ -321,11 +322,10 @@
 	     (write-value 'ifd-entry out entry))))
 
 (define-binary-class ifd-entry ()
-  ((id (ifd-tag :type '(u2-o :order (endian (parent-of-type 'exif-app1-segment)))))
-   (entry-type (ifd-type :type '(u2-o :order (endian (parent-of-type 'exif-app1-segment)))))
-   (entry-count (u4-o :order (endian (parent-of-type 'exif-app1-segment))))
-   (pointer (maybe-pointer :order (endian (parent-of-type 'exif-app1-segment))
-			   :type entry-type
+  ((id (ifd-tag :type 'u2))
+   (entry-type (ifd-type :type 'u2))
+   (entry-count u4)
+   (pointer (maybe-pointer :type entry-type
 			   :entry-count entry-count))))
 
 (defmethod print-object ((obj ifd-entry) stream)
@@ -462,55 +462,56 @@
   (iso-8859-1-terminated-string :terminator +null+))
 
 (define-enumeration ifd-type 
-  (u1								1)
-  (null-terminated-string					2)
-  ((u2-o :order (endian (parent-of-type 'exif-app1-segment)))		3)
-  ((u4-o :order (endian (parent-of-type 'exif-app1-segment)))		4)
-  (rational							5)
-  ((s1-o :order (endian (parent-of-type 'exif-app1-segment)))		6)
-  (undefined-byte						7)
-  ((s2-o :order (endian (parent-of-type 'exif-app1-segment)))		8)
-  ((s4-o :order (endian (parent-of-type 'exif-app1-segment)))		9)
-  (srational							10)
-  ((single-float :order (endian (parent-of-type 'exif-app1-segment)))	11)
-  ((double-float :order (endian (parent-of-type 'exif-app1-segment)))   12))
+  (u1           1)
+  (null-terminated-string 2)
+  (u2		3)
+  (u4		4)
+  (rational     5)
+  (s1		6)
+  (undefined-byte 7)
+  (s2		8)
+  (s4		9)
+  (srational    10)
+  (single-float	11)
+  (double-float  12))
 
-;; TODO fix
-(define-binary-type single-float (order)
-  (unsigned-integer :bytes 4 :bits-per-byte 8 :order order))
-(define-binary-type double-float (order)
-  (unsigned-integer :bytes 8 :bits-per-byte 8 :order order))
+(define-binary-type single-float ()
+  (:reader (in)
+           (ieee-floats:decode-float32 (read-value 'u4 in)))
+  (:writer (out data)
+           (write-value 'u4 out (ieee-floats:encode-float32 data))))
+
+(define-binary-type double-float ()
+  (:reader (in)
+           (ieee-floats:decode-float64 (read-value 'u8 in)))
+  (:writer (out data)
+           (write-value 'u8 out (ieee-floats:encode-float64 data))))
 
 (define-binary-type undefined-byte () (unsigned-integer :bytes 1 :bits-per-byte 8))
 
 (define-binary-type rational ()
   (:reader (in)
 	   (handler-case
-	       (let ((order (endian (parent-of-type 'exif-app1-segment))))
-		 (/ (read-value 'u4-o in :order order)
-		    (read-value 'u4-o in :order order)))
+               (/ (read-value 'u4 in)
+                  (read-value 'u4 in))
 	     (division-by-zero () 0)))
   (:writer (out data)
-	   (let ((order (endian (parent-of-type 'exif-app1-segment))))
-	     (write-value 'u4-o out (numerator data) :order order)
-	     (write-value 'u4-o out (denominator data) :order order))))
+           (write-value 'u4 out (numerator data))
+           (write-value 'u4 out (denominator data))))
 
 (define-binary-type srational ()
   (:reader (in)
 	   (handler-case
-	       (let ((order (endian (parent-of-type 'exif-app1-segment))))
-		 (/ (read-value 's4-o in :order order)
-		    (read-value 's4-o in :order order)))
+               (/ (read-value 's4 in)
+                  (read-value 's4 in))
 	     (division-by-zero () 0)))
   (:writer (out data)
-	   (let ((order (endian (parent-of-type 'exif-app1-segment))))
-	     (write-value 's4-o out (numerator data) :order order)
-	     (write-value 's4-o out (denominator data) :order order))))
+           (write-value 's4 out (numerator data))
+           (write-value 's4 out (denominator data))))
 
 (define-binary-type tiff-endian ()
   (:reader (in)
 	   (let ((chars (read-value 'iso-8859-1-string in :length 2)))
-	     ;; (format t "Endianness: ~A~%" chars)
 	     (cond
 	       ((equal chars "II") :little-endian)
 	       ((equal chars "MM") :big-endian)
@@ -601,7 +602,7 @@
 
 (define-binary-class p-string ()
   ((size u1)
-   (text p-string-text (:size size))))
+   (text (p-string-text :size size))))
 
 (define-binary-type p-string-text (size)
   (:reader (in)
